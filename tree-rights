@@ -34,7 +34,7 @@ sub usage_man() {
     }
 }
 
-my (%opt);
+my (%opt, %roles);
 
 sub process_info_options() {
     pod2usage(1)
@@ -56,12 +56,16 @@ sub load_options() {
     Getopt::Long::Configure("bundling");
 
     %opt = (
+        directory => './',
+        role      => {},
     );
 
     GetOptions(\%opt,
         "help|h|?",
         "man",
         "version",
+        "directory|d=s",
+        "role|r=s%",
     )
         or pod2usage(2)
     ;
@@ -69,6 +73,32 @@ sub load_options() {
 
 
 sub do_the_work() {
+    %roles = ();
+    for my $role (keys %{$opt{role}}) {
+        my $who = $opt{role}->{$role};
+
+        $who =~
+        /
+            (?(DEFINE)
+                (?<name> [a-z_][-_a-z0-9]* )
+            )
+            ^
+            (?<user> (?&name) )
+            (?:
+                :
+                (?<group> (?&name) )
+            )?
+            $
+        /x
+            or die qq(Malformed role for "$role": $who\n)
+        ;
+
+        $roles{$role} = {
+            user  => $+{user},
+            group => $+{group} // $+{user},
+        };
+    }
+
 }
 
 
@@ -98,9 +128,9 @@ B<tree-rights> (B<-h> | B<-?> | B<--help> | B<--man> | B<--version>)
 
 =over
 
-=item B<...>
+=item B<-d> I<path>, B<--directory=>I<path>
 
-...
+Path to the tree. Default is C<.>, t.i. current working directory.
 
 =item I<...>
 
@@ -113,6 +143,14 @@ Print short help about usage and exit.
 =item B<--man>
 
 Display full man and exit.
+
+=item B<-r> I<role>B<=>I<owner>, B<--role=>I<role>B<=>I<owner>
+
+Declare roles to use in rules table. One B<-r> declares one role, so
+multiple B<-r>s are fine.
+
+Here I<owner> should be I<user>[B<:>I<group>]. If I<group> is ommited, then
+I<user> will be used as group.
 
 =item B<--version>
 

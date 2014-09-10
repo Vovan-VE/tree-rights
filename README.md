@@ -16,7 +16,7 @@ rights table
 
 *   owner, group:
 
-        <role>
+        <role> | "-"
 
 *   oct-mode:
 
