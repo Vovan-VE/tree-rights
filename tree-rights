@@ -34,7 +34,9 @@ sub usage_man() {
     }
 }
 
-my (%opt, %roles);
+my (%opt, %roles, @rules);
+
+my $RE_ROLE = qr/[a-z_][-_a-z0-9]*/;
 
 sub process_info_options() {
     pod2usage(1)
@@ -58,6 +60,7 @@ sub load_options() {
     %opt = (
         directory => './',
         role      => {},
+        rules     => undef,
     );
 
     GetOptions(\%opt,
@@ -66,15 +69,24 @@ sub load_options() {
         "version",
         "directory|d=s",
         "role|r=s%",
+        "rules|f=s",
     )
         or pod2usage(2)
     ;
+
+    $opt{rules} //= shift @ARGV;
+    $opt{rules} //= '-';
+    @ARGV and pod2usage(2);
 }
 
 
 sub init_roles() {
     %roles = ();
     for my $role (keys %{$opt{role}}) {
+        $role =~ /^$RE_ROLE$/
+            or die qq(E! Bad role name: "$role"\n)
+        ;
+
         my $who = $opt{role}->{$role};
 
         $who =~
@@ -90,7 +102,7 @@ sub init_roles() {
             )?
             $
         /x
-            or die qq(Malformed role for "$role": $who\n)
+            or die qq(E! Malformed role for "$role": $who\n)
         ;
 
         $roles{$role} = {
@@ -100,8 +112,97 @@ sub init_roles() {
     }
 }
 
+sub read_rules() {
+    my $f;
+    my $fail = 0;
+
+    if ('-' eq $opt{rules}) {
+        $f = \*STDIN;
+    }
+    else {
+        open($f, '<', $opt{rules}) or die qq(E! Unable to read "$opt{rules}": $!\n);
+    }
+
+    @rules = ();
+
+    while (my $rule = <$f>) {
+        chomp $rule;
+        my ($pattern, $chown, $mode, @rest) = split(/\s+/, $rule);
+
+        if (@rest) {
+            warn qq(W! Malformed rule - too much fields: [$.] $rule\n);
+            $fail = 1;
+            next;
+        }
+
+        if ('' eq $pattern) {
+            warn qq(W! Empty pattern: [$.] $rule\n);
+            $fail = 1;
+            next;
+        }
+
+        if (defined $chown) {
+            if ('-' eq $chown) {
+                $chown = undef;
+            }
+            elsif ($chown =~ /^(?:-|$RE_ROLE)(?::(?:-|$RE_ROLE))?$/) {
+                my ($user, $group) = my (@whos) = split ':', $chown;
+                $group //= $user;
+
+                my $unknown = 0;
+                for my $role (@whos) {
+                    next unless defined $role;
+                    unless (defined $roles{$role}) {
+                        warn qq(W! Unknown role "$role": [$.] $rule\n);
+                        $unknown = 1;
+                    }
+                }
+                if ($unknown) {
+                    $fail = 1;
+                    next;
+                }
+
+                $chown = {
+                    user  => $roles{$user }->{user},
+                    group => $roles{$group}->{group},
+                };
+            }
+            else {
+                warn qq(W! Malformed CHOWN "$chown": [$.] $rule\n);
+                $fail = 1;
+                next;
+            }
+        }
+
+        if (defined $mode) {
+            if ('-' eq $mode) {
+                $mode = undef;
+            }
+            elsif ($mode =~ /^[0-7]{3}$/) {
+                # ok
+            }
+            else {
+                warn qq(W! Malformed MODE "$mode": [$.] $rule\n);
+                $fail = 1;
+                next;
+            }
+        }
+
+        push @rules, {
+            pattern => $pattern,
+            chown   => $chown,
+            mode    => $mode,
+        };
+    }
+
+    close $f unless $f == \*STDIN;
+
+    $fail and die qq(E! Some rules are not valid\n);
+}
+
 sub do_the_work() {
     init_roles();
+    read_rules();
 
 }
 
@@ -120,7 +221,7 @@ tree-rights - a tool to change filesystem rights according to rules
 
 =head1 SYNOPSIS
 
-B<tree-rights> [I<options>]
+B<tree-rights> [I<options>] [--] [<FILE>]
 
 B<tree-rights> (B<-h> | B<-?> | B<--help> | B<--man> | B<--version>)
 
@@ -136,9 +237,12 @@ B<tree-rights> (B<-h> | B<-?> | B<--help> | B<--man> | B<--version>)
 
 Path to the tree. Default is C<.>, t.i. current working directory.
 
-=item I<...>
+=item B<-f> I<FILE>, B<--rules=>I<FILE>
 
-...
+File with rules. Standard input will be used if B<-f> is ommitted.
+Also C<-> can be passed as I<FILE> to mean STDIN explicitly.
+
+See also I<FILE>.
 
 =item B<-h>, B<-?>, B<--help>
 
@@ -159,6 +263,10 @@ I<user> will be used as group.
 =item B<--version>
 
 Print program version and exit.
+
+=item I<FILE>
+
+Same as B<-f>. Cannot be used together.
 
 =back
 

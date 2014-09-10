@@ -7,7 +7,7 @@ roles
 rights table
 ------------
 
-    pattern <LWS> owner [ ":" group ] <LWS> oct-mode
+    pattern <LWS> ( owner [ ":" group ] | "-" ) [ <LWS> oct-mode ]
     ...
 
 *   pattern:
@@ -16,7 +16,7 @@ rights table
 
 *   owner, group:
 
-        <role> | "-"
+        <role>
 
 *   oct-mode:
 
