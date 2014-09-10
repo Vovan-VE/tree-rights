@@ -72,7 +72,7 @@ sub load_options() {
 }
 
 
-sub do_the_work() {
+sub init_roles() {
     %roles = ();
     for my $role (keys %{$opt{role}}) {
         my $who = $opt{role}->{$role};
@@ -98,6 +98,10 @@ sub do_the_work() {
             group => $+{group} // $+{user},
         };
     }
+}
+
+sub do_the_work() {
+    init_roles();
 
 }
 
