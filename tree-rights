@@ -5,6 +5,7 @@ use warnings;
 use 5.010;
 
 use Pod::Usage;
+use File::Find;
 
 use constant {
     VERSION_NAME   => 'tree-rights',
@@ -73,6 +74,8 @@ sub load_options() {
     )
         or pod2usage(2)
     ;
+
+    $opt{directory} .= '/' unless $opt{directory} =~ m~/$~;
 
     $opt{rules} //= shift @ARGV;
     $opt{rules} //= '-';
@@ -200,16 +203,34 @@ sub read_rules() {
     $fail and die qq(E! Some rules are not valid\n);
 }
 
+sub perform_rights_change() {
+    my $rel_pos = length($opt{directory}) - 1;
+    my $process_found = sub () {
+        my $file     = $_;
+        my $full     = $File::Find::name;
+        my $relative = substr $full, $rel_pos;
+
+        return if -l $full;
+
+    };
+
+    find($process_found, $opt{directory});
+}
+
 sub do_the_work() {
     init_roles();
     read_rules();
 
+    chdir $opt{directory} or die qq(E! Unable to CD to "$opt{directory}" - $!\n);
+
+    perform_rights_change();
 }
 
 
 load_options();
 process_info_options();
 do_the_work();
+1;
 
 __END__;
 
