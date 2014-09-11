@@ -11,7 +11,7 @@ use File::Find;
 
 use constant {
     VERSION_NAME   => 'tree-rights',
-    VERSION_NUMBER => '1.0.0',
+    VERSION_NUMBER => '1.0.1',
 };
 use constant {
     VERSION => VERSION_NAME . '/' . VERSION_NUMBER,
@@ -136,7 +136,7 @@ sub init_roles() {
             m{
                 (?(DEFINE)
                     (?<name> [a-z_][-_a-z0-9]* )
-                    (?<mode> [0-7]{3} )
+                    (?<mode> [0-7]{3,4} )
                 )
                 ^
                 (?<user> (?&name) )
@@ -541,7 +541,7 @@ If I<group> is omited, then I<group> is same as I<user>.
 
 =item
 
-Both I<file-mode> and I<dir-mode> must be exactly 3 octal digits.
+Both I<file-mode> and I<dir-mode> must be 3 or 4 octal digits.
 
 =item
 
