@@ -86,6 +86,26 @@ sub load_options() {
 }
 
 
+sub get_user_id_by_name($) {
+    my ($name) = @_;
+
+    my (undef, undef, $uid) = getpwnam($name)
+        or return
+    ;
+
+    return $uid;
+}
+
+sub get_group_id_by_name($) {
+    my ($name) = @_;
+
+    my (undef, undef, $gid) = getgrnam($name)
+        or return
+    ;
+
+    return $gid;
+}
+
 sub file_mode_to_dir($) {
     my ($mode) = @_;
 
@@ -136,15 +156,22 @@ sub init_roles() {
             or die qq(E! Malformed role for "$role": $who\n)
         ;
 
+        my $user      = $+{user};
+        my $group     = $+{group} // $user;
         my $file_mode = $+{file_mode};
         my $dir_mode  = $+{dir_mode};
+
+        my $user_id  = get_user_id_by_name($user)   or die qq(E! User "$user" does not exist\n);
+        my $group_id = get_group_id_by_name($group) or die qq(E! Group "$group" does not exist\n);
 
         $file_mode = oct($file_mode) if defined $file_mode;
         $dir_mode  = oct($dir_mode)  if defined $dir_mode;
 
         $roles{$role} = {
-            user      => $+{user},
-            group     => $+{group} // $+{user},
+            user      => $user,
+            user_id   => $user_id,
+            group     => $group,
+            group_id  => $group_id,
             file_mode => $file_mode,
             dir_mode  => $dir_mode // file_mode_to_dir($file_mode),
         };
@@ -354,6 +381,13 @@ sub apply_role($$$) {
 
     my $role = $roles{$role_name};
     my $mode = ($is_dir) ? $role->{dir_mode} : $role->{file_mode};
+
+    chown $role->{user_id}, $role->{group_id}, $full
+        or warn qq(W! Can't CHOWN "$full" - $!\n)
+    ;
+    chmod $mode, $full
+        or warn qq(W! Can't CHMOD "$full" - $!\n)
+    ;
 }
 
 sub process_by_rules($$$) {
