@@ -1,4 +1,10 @@
-/*.php me 644
-/inc/**/*.php me 644
-/files web:me 664
-/files/.* me 644
+.*                me     644
+
+/                 me     755
+/*.php            me     644
+/inc/**/*.php     me     644
+/files/**         web:me 664
+/files/**/        web:me 664
+
+*                 me     644
+*/                me     755

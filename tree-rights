@@ -3,7 +3,9 @@
 use strict;
 use warnings;
 use 5.010;
+use utf8;
 
+use Carp;
 use Pod::Usage;
 use File::Find;
 
@@ -38,6 +40,7 @@ sub usage_man() {
 my (%opt, %roles, @rules);
 
 my $RE_ROLE = qr/[a-z_][-_a-z0-9]*/;
+my $RE_TRUE = qr/(?=)/;
 
 sub process_info_options() {
     pod2usage(1)
@@ -75,7 +78,7 @@ sub load_options() {
         or pod2usage(2)
     ;
 
-    $opt{directory} .= '/' unless $opt{directory} =~ m~/$~;
+    $opt{directory} .= '/' unless $opt{directory} =~ m{/$};
 
     $opt{rules} //= shift @ARGV;
     $opt{rules} //= '-';
@@ -115,6 +118,101 @@ sub init_roles() {
     }
 }
 
+sub pattern_to_re($$) {
+    my ($pattern, $dir) = @_;
+
+    $pattern =~ s{/$}{};
+
+    return $RE_TRUE if '/**' eq $pattern;
+    return $RE_TRUE if '**'  eq $pattern;
+    return $RE_TRUE if '*'   eq $pattern;
+
+    # /
+    return qr{^/$} if !$pattern && $dir;
+
+    # **/foo/bar
+    # **/**/foo/bar
+    # /**/foo/bar
+    # /**/**/foo/bar
+    # =>
+    # foo/bar
+    $pattern =~ s{^/?(?:\*\*/)+} {};
+
+    # foo/**/**/bar
+    # foo/**/**/**/bar
+    # =>
+    # foo/**/bar
+    # ---------
+    # foo/**/**
+    # foo/**/**/**
+    # =>
+    # foo/**
+    $pattern =~ s{(?:/\*\*)+} {/**};
+
+    my @re;
+
+    # /foo/bar =>         ^/foo/bar
+    # foo/bar  => (^|(?<=/))foo/bar
+    push @re, ($pattern =~ m{^/}) ? qr{^} : qr{^|(?<=/)};
+
+    # уже проверил, что нет более двух смежных звезд (***...)
+    # и неправильных двойных звезд (смежных с мусором: foo**bar)
+    my @parts = split qr{( /\*\* /? | \*{1,2} | \?+ | \[ (?:[^\\\[\]]++|\\.)* \] )}x, $pattern;
+    for my $part (@parts) {
+        next unless $part;
+
+        # foo/**/bar
+        #    ^^^^
+        if ('/**/' eq $part) {
+            push @re, qr{/(?:[^/]+/)*};
+            next;
+        }
+
+        # foo/**
+        #    ^^^
+        if ('/**' eq $part) {
+            push @re, qr{/.*};
+            next;
+        }
+
+        # **
+        if ('**' eq $part) {
+            confess 'E! Unexpected "**"';
+        }
+
+        # foo*bar
+        #    ^
+        if ('*' eq $part) {
+            push @re, qr{[^/]*};
+            next;
+        }
+
+        # foo?bar
+        #    ^
+        # foo???bar
+        #    ^^^
+        if ('?' eq substr($part, 0, 1)) {
+            my $n = length $part;
+            push @re, qr<[^/]{$n}>;
+            next;
+        }
+
+        # foo[...]bar
+        #    ^^^^^
+        if ($part =~ /^\[/) {
+            push @re, qr/$part/;
+            next;
+        }
+
+        push @re, qr/\Q$part\E/;
+    }
+
+    push @re, qr/$/;
+
+    local $" = '';
+    return qr/@re/;
+}
+
 sub read_rules() {
     my $f;
     my $fail = 0;
@@ -130,6 +228,7 @@ sub read_rules() {
 
     while (my $rule = <$f>) {
         chomp $rule;
+        next if $rule =~ /^(?:#|$)/;
         my ($pattern, $chown, $mode, @rest) = split(/\s+/, $rule);
 
         if (@rest) {
@@ -143,6 +242,39 @@ sub read_rules() {
             $fail = 1;
             next;
         }
+
+        unless ($pattern =~
+            m{
+                ^
+                /?
+                (?:
+                    # компонент пути
+                    (?:
+                        \*\*
+                    |
+                        (?:
+                            [^/*]++
+                        |
+                            \* (?! \* )
+                        )+
+                    )
+                    # конец или слеш перед повтором
+                    (?:
+                        $
+                    |
+                        /
+                    )
+                )*
+                $
+            }x
+        ) {
+            warn qq(W! Invalid pattern "$pattern": [$.] $rule\n);
+            $fail = 1;
+            next;
+        }
+
+        my $dir = $pattern =~ m{/$};
+        my $re  = pattern_to_re($pattern, $dir);
 
         if (defined $chown) {
             if ('-' eq $chown) {
@@ -193,6 +325,8 @@ sub read_rules() {
 
         push @rules, {
             pattern => $pattern,
+            re      => $re,
+            dir     => $dir,
             chown   => $chown,
             mode    => $mode,
         };
@@ -203,15 +337,36 @@ sub read_rules() {
     $fail and die qq(E! Some rules are not valid\n);
 }
 
+sub process_by_rules($$$$) {
+    my ($relative, $name, $full, $is_dir) = @_;
+
+    my $ok = 0;
+    for my $rule (@rules) {
+        next   if $is_dir xor $rule->{dir};
+        next   if $relative !~ $rule->{re};
+
+        $ok = 1;
+        last;
+    }
+}
+
 sub perform_rights_change() {
+    # /path/subpath
+    # ------
+    #      ^
+    # =>
+    #      /subpath
     my $rel_pos = length($opt{directory}) - 1;
-    my $process_found = sub () {
-        my $file     = $_;
+    my $process_found = sub {
+        my $name     = $_;
         my $full     = $File::Find::name;
         my $relative = substr $full, $rel_pos;
 
         return if -l $full;
+        my $is_dir = -d _;
+        $relative .= '/' if $is_dir;
 
+        process_by_rules($relative, $name, $full, $is_dir);
     };
 
     find($process_found, $opt{directory});
