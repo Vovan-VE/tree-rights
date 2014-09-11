@@ -1,10 +1,13 @@
-.*                me     644
+.*                my
 
-/                 me     755
-/*.php            me     644
-/inc/**/*.php     me     644
-/files/**         web:me 664
-/files/**/        web:me 664
+/                 my
+/*.php            my
+/inc/**/*.php     my
+/files/**         our
+/files/**/        our
 
-*                 me     644
-*/                me     755
+/foo/bar/         our
+/foo/bar/**       web
+
+*                 my
+*/                my

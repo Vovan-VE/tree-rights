@@ -1,23 +1,18 @@
 roles
 -----
 
-*   support - `git:users`
-*   web - `apache:apache`
+    roles[$name] = owner, group, file-mode, dir-mode
 
 rights table
 ------------
 
-    pattern <LWS> ( owner [ ":" group ] | "-" ) [ <LWS> oct-mode ]
+    pattern <LWS> who
     ...
 
 *   pattern:
 
         ["/"] [<path> "/"] <name> ["/"]
 
-*   owner, group:
+*   who
 
         <role>
-
-*   oct-mode:
-
-        3*<oct-digit>

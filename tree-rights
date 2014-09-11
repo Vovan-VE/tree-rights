@@ -86,6 +86,23 @@ sub load_options() {
 }
 
 
+sub file_mode_to_dir($) {
+    my ($mode) = @_;
+
+    #   0640
+    # & 0444
+    # ------
+    #   0440
+    # >>   2
+    # ------
+    #   0110
+    # | 0640
+    # ------
+    #   0750
+
+    return $mode | ($mode & 0444) >> 2;
+}
+
 sub init_roles() {
     %roles = ();
     for my $role (keys %{$opt{role}}) {
@@ -96,24 +113,40 @@ sub init_roles() {
         my $who = $opt{role}->{$role};
 
         $who =~
-        /
-            (?(DEFINE)
-                (?<name> [a-z_][-_a-z0-9]* )
-            )
-            ^
-            (?<user> (?&name) )
-            (?:
-                :
-                (?<group> (?&name) )
-            )?
-            $
-        /x
+            m{
+                (?(DEFINE)
+                    (?<name> [a-z_][-_a-z0-9]* )
+                    (?<mode> [0-7]{3} )
+                )
+                ^
+                (?<user> (?&name) )
+                (?:
+                    :
+                    (?<group> (?&name) )
+                )?
+                ,
+                (?= (?&mode) )
+                (?:
+                    (?<dir_mode> (?&mode) )
+                    /
+                )?
+                (?<file_mode> (?&mode) )?
+                $
+            }x
             or die qq(E! Malformed role for "$role": $who\n)
         ;
 
+        my $file_mode = $+{file_mode};
+        my $dir_mode  = $+{dir_mode};
+
+        $file_mode = oct($file_mode) if defined $file_mode;
+        $dir_mode  = oct($dir_mode)  if defined $dir_mode;
+
         $roles{$role} = {
-            user  => $+{user},
-            group => $+{group} // $+{user},
+            user      => $+{user},
+            group     => $+{group} // $+{user},
+            file_mode => $file_mode,
+            dir_mode  => $dir_mode // file_mode_to_dir($file_mode),
         };
     }
 }
@@ -228,8 +261,9 @@ sub read_rules() {
 
     while (my $rule = <$f>) {
         chomp $rule;
+        $rule =~ s/\s+$//;
         next if $rule =~ /^(?:#|$)/;
-        my ($pattern, $chown, $mode, @rest) = split(/\s+/, $rule);
+        my ($pattern, $whos, @rest) = split(/\s+/, $rule);
 
         if (@rest) {
             warn qq(W! Malformed rule - too much fields: [$.] $rule\n);
@@ -276,48 +310,27 @@ sub read_rules() {
         my $dir = $pattern =~ m{/$};
         my $re  = pattern_to_re($pattern, $dir);
 
-        if (defined $chown) {
-            if ('-' eq $chown) {
-                $chown = undef;
+        if (defined $whos) {
+            if ('-' eq $whos) {
+                $whos = undef;
             }
-            elsif ($chown =~ /^(?:-|$RE_ROLE)(?::(?:-|$RE_ROLE))?$/) {
-                my ($user, $group) = my (@whos) = split ':', $chown;
-                $group //= $user;
-
-                my $unknown = 0;
-                for my $role (@whos) {
-                    next unless defined $role;
-                    unless (defined $roles{$role}) {
-                        warn qq(W! Unknown role "$role": [$.] $rule\n);
-                        $unknown = 1;
-                    }
-                }
-                if ($unknown) {
+            elsif ($whos =~ /^$RE_ROLE$/) {
+                unless (defined $roles{$whos}) {
+                    warn qq(W! Unknown role "$whos": [$.] $rule\n);
                     $fail = 1;
                     next;
                 }
 
-                $chown = {
-                    user  => $roles{$user }->{user},
-                    group => $roles{$group}->{group},
-                };
-            }
-            else {
-                warn qq(W! Malformed CHOWN "$chown": [$.] $rule\n);
-                $fail = 1;
-                next;
-            }
-        }
+                if (!$dir && !defined $roles{$whos}->{file_mode}) {
+                    warn qq(W! Role "$whos" cannot be applied for files: [$.] $rule\n);
+                    $fail = 1;
+                    next;
+                }
 
-        if (defined $mode) {
-            if ('-' eq $mode) {
-                $mode = undef;
-            }
-            elsif ($mode =~ /^[0-7]{3}$/) {
                 # ok
             }
             else {
-                warn qq(W! Malformed MODE "$mode": [$.] $rule\n);
+                warn qq(W! Malformed role "$whos": [$.] $rule\n);
                 $fail = 1;
                 next;
             }
@@ -327,8 +340,7 @@ sub read_rules() {
             pattern => $pattern,
             re      => $re,
             dir     => $dir,
-            chown   => $chown,
-            mode    => $mode,
+            whos    => $whos,
         };
     }
 
@@ -337,8 +349,15 @@ sub read_rules() {
     $fail and die qq(E! Some rules are not valid\n);
 }
 
-sub process_by_rules($$$$) {
-    my ($relative, $name, $full, $is_dir) = @_;
+sub apply_role($$$) {
+    my ($full, $role_name, $is_dir) = @_;
+
+    my $role = $roles{$role_name};
+    my $mode = ($is_dir) ? $role->{dir_mode} : $role->{file_mode};
+}
+
+sub process_by_rules($$$) {
+    my ($relative, $full, $is_dir) = @_;
 
     my $ok = 0;
     for my $rule (@rules) {
@@ -346,8 +365,13 @@ sub process_by_rules($$$$) {
         next   if $relative !~ $rule->{re};
 
         $ok = 1;
+        apply_role($full, $rule->{whos}, $is_dir)
+            if defined $rule->{whos}
+        ;
         last;
     }
+
+    warn qq(W! no patterns matched "$relative"\n) unless $ok;
 }
 
 sub perform_rights_change() {
@@ -366,7 +390,7 @@ sub perform_rights_change() {
         my $is_dir = -d _;
         $relative .= '/' if $is_dir;
 
-        process_by_rules($relative, $name, $full, $is_dir);
+        process_by_rules($relative, $full, $is_dir);
     };
 
     find($process_found, $opt{directory});
@@ -415,7 +439,7 @@ Path to the tree. Default is C<.>, t.i. current working directory.
 
 =item B<-f> I<FILE>, B<--rules=>I<FILE>
 
-File with rules. Standard input will be used if B<-f> is ommitted.
+File with rules. Standard input will be used if B<-f> is omitted.
 Also C<-> can be passed as I<FILE> to mean STDIN explicitly.
 
 See also I<FILE>.
@@ -428,13 +452,38 @@ Print short help about usage and exit.
 
 Display full man and exit.
 
-=item B<-r> I<role>B<=>I<owner>, B<--role=>I<role>B<=>I<owner>
+=item B<-r> I<role>B<=>I<perm>, B<--role=>I<role>B<=>I<perm>
 
 Declare roles to use in rules table. One B<-r> declares one role, so
 multiple B<-r>s are fine.
 
-Here I<owner> should be I<user>[B<:>I<group>]. If I<group> is ommited, then
-I<user> will be used as group.
+Here I<perm> should be I<user>[B<:>I<group>]B<,>[I<dir-mode>B</>][I<file-mode>].
+
+=over
+
+=item
+
+If I<group> is omited, then I<group> is same as I<user>.
+
+=item
+
+Both I<file-mode> and I<dir-mode> must be exactly 3 octal digits.
+
+=item
+
+Either I<file-mode> or I<dir-mode> must be passed.
+
+=item
+
+If I<dir-mode> is omited, then I<dir-mode> is derived from I<file-mode>
+setting B<x> bit where B<r> bit is set (i.e. I<640> become I<750>).
+
+=item
+
+If I<file-mode> is omited, then the role can be applied for directories only,
+not for files.
+
+=back
 
 =item B<--version>
 
