@@ -40,7 +40,7 @@ sub usage_man() {
 my (%opt, %roles, @rules);
 
 my $RE_ROLE = qr/[a-z_][-_a-z0-9]*/;
-my $RE_TRUE = qr/(?=)/;
+my $RE_TRUE = qr/(?=$|[\d\D])/;
 
 sub process_info_options() {
     pod2usage(1)
