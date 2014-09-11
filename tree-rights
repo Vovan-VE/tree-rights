@@ -209,6 +209,8 @@ sub pattern_to_re($$) {
     # foo/**
     $pattern =~ s{(?:/\*\*)+} {/**};
 
+    $pattern .= '/' if $dir && $pattern !~ m{\*\*/$};
+
     my @re;
 
     # /foo/bar =>         ^/foo/bar
