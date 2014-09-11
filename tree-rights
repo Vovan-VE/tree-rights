@@ -11,7 +11,7 @@ use File::Find;
 
 use constant {
     VERSION_NAME   => 'tree-rights',
-    VERSION_NUMBER => '0.0.0',
+    VERSION_NUMBER => '1.0.0',
 };
 use constant {
     VERSION => VERSION_NAME . '/' . VERSION_NUMBER,
@@ -451,7 +451,8 @@ __END__;
 
 =head1 NAME
 
-tree-rights - a tool to change filesystem rights according to rules
+tree-rights - a tool to change filesystem rights if a project directory
+according to rules
 
 =head1 SYNOPSIS
 
@@ -461,7 +462,44 @@ B<tree-rights> (B<-h> | B<-?> | B<--help> | B<--man> | B<--version>)
 
 =head1 DESCRIPTION
 
-...
+This tool scan project directory recursively and change owners and permisions
+with respect to rules.
+
+Rules read from file B<-f> (see B<OPTIONS>).
+
+=over
+
+=item
+
+Empty lines and lines starting with C<#> are completely ignored as comments.
+
+=item
+
+Normal lines are splitted by whitespaces into fields. Currently up to 2 fields are expected:
+
+=over
+
+=item 1 I<pattern> - pattern for path relative to project root in B<gitignore>
+style, but with some differences:
+
+=over
+
+=item Patterns without C</> in the end will match regular files only. Same as patterns
+with C</> will match directories only.
+
+=item No any negations with C<!> are needed.
+
+=back
+
+=item 2 I<whos> - a role, defined with B<-r> switch. If I<whos> is omited,
+then rule will successfully do nothing.
+
+=back
+
+=back
+
+When project directory is scanned, each found file and directory will be testes
+by patterns in the order, and only one first matched rule will be applied.
 
 =head1 OPTIONS
 
