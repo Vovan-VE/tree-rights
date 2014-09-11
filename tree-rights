@@ -422,6 +422,8 @@ sub perform_rights_change() {
 
         return if -l $full;
         my $is_dir = -d _;
+        return unless $is_dir || -f _;
+        
         $relative .= '/' if $is_dir;
 
         process_by_rules($relative, $full, $is_dir);
