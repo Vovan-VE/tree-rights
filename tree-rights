@@ -379,9 +379,9 @@ sub read_rules() {
 }
 
 sub apply_role($$$) {
-    my ($full, $role_name, $is_dir) = @_;
+    my ($full, $rule, $is_dir) = @_;
 
-    my $role = $roles{$role_name};
+    my $role = $roles{$rule->{whos}};
     my $mode = ($is_dir) ? $role->{dir_mode} : $role->{file_mode};
 
     chown $role->{user_id}, $role->{group_id}, $full
@@ -400,10 +400,11 @@ sub process_by_rules($$$) {
         next   if $is_dir xor $rule->{dir};
         next   if $relative !~ $rule->{re};
 
+        if (defined $rule->{whos}) {
+            apply_role($full, $rule, $is_dir)
+        }
+
         $ok = 1;
-        apply_role($full, $rule->{whos}, $is_dir)
-            if defined $rule->{whos}
-        ;
         last;
     }
 
@@ -418,20 +419,33 @@ sub perform_rights_change() {
     #      /subpath
     my $rel_pos = length($opt{directory}) - 1;
     my $process_found = sub {
-        my $name     = $_;
         my $full     = $File::Find::name;
         my $relative = substr $full, $rel_pos;
 
-        return if -l $full;
+        unless (lstat $full) {
+            warn qq(W: Can't STAT "$full" - $!\n);
+            return;
+        }
+
+        if (-l _) {
+            return;
+        }
+
         my $is_dir = -d _;
-        return unless $is_dir || -f _;
+        unless ($is_dir || -f _) {
+            return;
+        }
         
         $relative .= '/' if $is_dir;
 
         process_by_rules($relative, $full, $is_dir);
     };
 
-    find($process_found, $opt{directory});
+    find({  wanted   => $process_found,
+            no_chdir => 1,
+         },
+         $opt{directory}
+    );
 }
 
 sub do_the_work() {
