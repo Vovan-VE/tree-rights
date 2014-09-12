@@ -65,6 +65,7 @@ sub load_options() {
         directory => './',
         role      => {},
         rules     => undef,
+        verbose   => undef,
     );
 
     GetOptions(\%opt,
@@ -74,6 +75,7 @@ sub load_options() {
         "directory|d=s",
         "role|r=s%",
         "rules|f=s",
+        "verbose|v",
     )
         or pod2usage(2)
     ;
@@ -384,6 +386,11 @@ sub apply_role($$$) {
     my $role = $roles{$rule->{whos}};
     my $mode = ($is_dir) ? $role->{dir_mode} : $role->{file_mode};
 
+    if ($opt{verbose}) {
+        my $mode_oct = sprintf '%o', $mode;
+        warn qq(I: $full => $rule->{pattern} => CHOWN $role->{user}:$role->{group}, CHMOD $mode_oct\n);
+    }
+
     chown $role->{user_id}, $role->{group_id}, $full
         or warn qq(W! Can't CHOWN "$full" - $!\n)
     ;
@@ -402,6 +409,9 @@ sub process_by_rules($$$) {
 
         if (defined $rule->{whos}) {
             apply_role($full, $rule, $is_dir)
+        }
+        else {
+            warn qq(I: $full => $rule->{pattern} => do nothing\n) if $opt{verbose};
         }
 
         $ok = 1;
@@ -428,16 +438,19 @@ sub perform_rights_change() {
         }
 
         if (-l _) {
+            warn qq(I: symlink skipped: $relative\n) if $opt{verbose};
             return;
         }
 
         my $is_dir = -d _;
         unless ($is_dir || -f _) {
+            warn qq(I: neither file nor directory skipped: $relative\n) if $opt{verbose};
             return;
         }
         
         $relative .= '/' if $is_dir;
 
+        warn qq(I: found $relative\n) if $opt{verbose};
         process_by_rules($relative, $full, $is_dir);
     };
 
@@ -574,6 +587,10 @@ If I<file-mode> is omited, then the role can be applied for directories only,
 not for files.
 
 =back
+
+=item B<-v>, B<--verbose>
+
+Tell about changes to STDERR.
 
 =item B<--version>
 
