@@ -11,7 +11,7 @@ use File::Find;
 
 use constant {
     VERSION_NAME   => 'tree-rights',
-    VERSION_NUMBER => '1.0.1',
+    VERSION_NUMBER => '1.0.2',
 };
 use constant {
     VERSION => VERSION_NAME . '/' . VERSION_NUMBER,
@@ -65,6 +65,7 @@ sub load_options() {
         directory => './',
         role      => {},
         rules     => undef,
+        verbose   => undef,
     );
 
     GetOptions(\%opt,
@@ -74,6 +75,7 @@ sub load_options() {
         "directory|d=s",
         "role|r=s%",
         "rules|f=s",
+        "verbose|v",
     )
         or pod2usage(2)
     ;
@@ -379,10 +381,15 @@ sub read_rules() {
 }
 
 sub apply_role($$$) {
-    my ($full, $role_name, $is_dir) = @_;
+    my ($full, $rule, $is_dir) = @_;
 
-    my $role = $roles{$role_name};
+    my $role = $roles{$rule->{whos}};
     my $mode = ($is_dir) ? $role->{dir_mode} : $role->{file_mode};
+
+    if ($opt{verbose}) {
+        my $mode_oct = sprintf '%o', $mode;
+        warn qq(I: $full => $rule->{pattern} => CHOWN $role->{user}:$role->{group}, CHMOD $mode_oct\n);
+    }
 
     chown $role->{user_id}, $role->{group_id}, $full
         or warn qq(W! Can't CHOWN "$full" - $!\n)
@@ -400,10 +407,14 @@ sub process_by_rules($$$) {
         next   if $is_dir xor $rule->{dir};
         next   if $relative !~ $rule->{re};
 
+        if (defined $rule->{whos}) {
+            apply_role($full, $rule, $is_dir)
+        }
+        else {
+            warn qq(I: $full => $rule->{pattern} => do nothing\n) if $opt{verbose};
+        }
+
         $ok = 1;
-        apply_role($full, $rule->{whos}, $is_dir)
-            if defined $rule->{whos}
-        ;
         last;
     }
 
@@ -418,20 +429,36 @@ sub perform_rights_change() {
     #      /subpath
     my $rel_pos = length($opt{directory}) - 1;
     my $process_found = sub {
-        my $name     = $_;
         my $full     = $File::Find::name;
         my $relative = substr $full, $rel_pos;
 
-        return if -l $full;
+        unless (lstat $full) {
+            warn qq(W: Can't STAT "$full" - $!\n);
+            return;
+        }
+
+        if (-l _) {
+            warn qq(I: symlink skipped: $relative\n) if $opt{verbose};
+            return;
+        }
+
         my $is_dir = -d _;
-        return unless $is_dir || -f _;
+        unless ($is_dir || -f _) {
+            warn qq(I: neither file nor directory skipped: $relative\n) if $opt{verbose};
+            return;
+        }
         
         $relative .= '/' if $is_dir;
 
+        warn qq(I: found $relative\n) if $opt{verbose};
         process_by_rules($relative, $full, $is_dir);
     };
 
-    find($process_found, $opt{directory});
+    find({  wanted   => $process_found,
+            no_chdir => 1,
+         },
+         $opt{directory}
+    );
 }
 
 sub do_the_work() {
@@ -560,6 +587,10 @@ If I<file-mode> is omited, then the role can be applied for directories only,
 not for files.
 
 =back
+
+=item B<-v>, B<--verbose>
+
+Tell about changes to STDERR.
 
 =item B<--version>
 
