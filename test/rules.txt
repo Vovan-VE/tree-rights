@@ -1,0 +1,13 @@
+.*                my
+
+/                 my
+/*.php            my
+/inc/**/*.php     my
+/files/**         our
+/files/**/        our
+
+/foo/bar/         our
+/foo/bar/**       web
+
+*                 my
+*/                my

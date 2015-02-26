@@ -1,0 +1,584 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use 5.010;
+use utf8;
+
+use Carp;
+use Pod::Usage;
+use File::Find;
+
+use constant {
+    VERSION_NAME   => 'tree-rights',
+    VERSION_NUMBER => '1.0.1',
+};
+use constant {
+    VERSION => VERSION_NAME . '/' . VERSION_NUMBER,
+};
+
+# подробный man программы
+sub usage_man() {
+    use Pod::Man;
+
+    my $parser = Pod::Man->new(
+        center  => VERSION_NAME . " Manual",
+        release => VERSION_NUMBER,
+    );
+    if ( open(my $man, "|man -l -") ) {
+        $parser->parse_from_file(__FILE__, $man);
+        close $man;
+        exit 0;
+    }
+    else {
+        warn "Can't create a pipe to man tool\n";
+        warn "Try to execute:  pod2man '$0' | man -l -\n";
+        exit 1;
+    }
+}
+
+my (%opt, %roles, @rules);
+
+my $RE_ROLE = qr/[a-z_][-_a-z0-9]*/;
+my $RE_TRUE = qr/(?=$|[\d\D])/;
+
+sub process_info_options() {
+    pod2usage(1)
+        if defined $opt{help}
+    ;
+
+    usage_man()
+        if defined $opt{man}
+    ;
+
+    say(VERSION) and exit(0)
+        if defined $opt{version}
+    ;
+}
+
+sub load_options() {
+    use Getopt::Long;
+
+    Getopt::Long::Configure("bundling");
+
+    %opt = (
+        directory => './',
+        role      => {},
+        rules     => undef,
+    );
+
+    GetOptions(\%opt,
+        "help|h|?",
+        "man",
+        "version",
+        "directory|d=s",
+        "role|r=s%",
+        "rules|f=s",
+    )
+        or pod2usage(2)
+    ;
+
+    $opt{directory} .= '/' unless $opt{directory} =~ m{/$};
+
+    $opt{rules} //= shift @ARGV;
+    $opt{rules} //= '-';
+    @ARGV and pod2usage(2);
+}
+
+
+sub get_user_id_by_name($) {
+    my ($name) = @_;
+
+    my (undef, undef, $uid) = getpwnam($name)
+        or return
+    ;
+
+    return $uid;
+}
+
+sub get_group_id_by_name($) {
+    my ($name) = @_;
+
+    my (undef, undef, $gid) = getgrnam($name)
+        or return
+    ;
+
+    return $gid;
+}
+
+sub file_mode_to_dir($) {
+    my ($mode) = @_;
+
+    #   0640
+    # & 0444
+    # ------
+    #   0440
+    # >>   2
+    # ------
+    #   0110
+    # | 0640
+    # ------
+    #   0750
+
+    return $mode | ($mode & 0444) >> 2;
+}
+
+sub init_roles() {
+    %roles = ();
+    for my $role (keys %{$opt{role}}) {
+        $role =~ /^$RE_ROLE$/
+            or die qq(E! Bad role name: "$role"\n)
+        ;
+
+        my $who = $opt{role}->{$role};
+
+        $who =~
+            m{
+                (?(DEFINE)
+                    (?<name> [a-z_][-_a-z0-9]* )
+                    (?<mode> [0-7]{3,4} )
+                )
+                ^
+                (?<user> (?&name) )
+                (?:
+                    :
+                    (?<group> (?&name) )
+                )?
+                ,
+                (?= (?&mode) )
+                (?:
+                    (?<dir_mode> (?&mode) )
+                    /
+                )?
+                (?<file_mode> (?&mode) )?
+                $
+            }x
+            or die qq(E! Malformed role for "$role": $who\n)
+        ;
+
+        my $user      = $+{user};
+        my $group     = $+{group} // $user;
+        my $file_mode = $+{file_mode};
+        my $dir_mode  = $+{dir_mode};
+
+        my $user_id  = get_user_id_by_name($user)   or die qq(E! User "$user" does not exist\n);
+        my $group_id = get_group_id_by_name($group) or die qq(E! Group "$group" does not exist\n);
+
+        $file_mode = oct($file_mode) if defined $file_mode;
+        $dir_mode  = oct($dir_mode)  if defined $dir_mode;
+
+        $roles{$role} = {
+            user      => $user,
+            user_id   => $user_id,
+            group     => $group,
+            group_id  => $group_id,
+            file_mode => $file_mode,
+            dir_mode  => $dir_mode // file_mode_to_dir($file_mode),
+        };
+    }
+}
+
+sub pattern_to_re($$) {
+    my ($pattern, $dir) = @_;
+
+    $pattern =~ s{/$}{};
+
+    return $RE_TRUE if '/**' eq $pattern;
+    return $RE_TRUE if '**'  eq $pattern;
+    return $RE_TRUE if '*'   eq $pattern;
+
+    # /
+    return qr{^/$} if !$pattern && $dir;
+
+    # **/foo/bar
+    # **/**/foo/bar
+    # /**/foo/bar
+    # /**/**/foo/bar
+    # =>
+    # foo/bar
+    $pattern =~ s{^/?(?:\*\*/)+} {};
+
+    # foo/**/**/bar
+    # foo/**/**/**/bar
+    # =>
+    # foo/**/bar
+    # ---------
+    # foo/**/**
+    # foo/**/**/**
+    # =>
+    # foo/**
+    $pattern =~ s{(?:/\*\*)+} {/**};
+
+    $pattern .= '/' if $dir && $pattern !~ m{\*\*/$};
+
+    my @re;
+
+    # /foo/bar =>         ^/foo/bar
+    # foo/bar  => (^|(?<=/))foo/bar
+    push @re, ($pattern =~ m{^/}) ? qr{^} : qr{^|(?<=/)};
+
+    # уже проверил, что нет более двух смежных звезд (***...)
+    # и неправильных двойных звезд (смежных с мусором: foo**bar)
+    my @parts = split qr{( /\*\* /? | \*{1,2} | \?+ | \[ (?:[^\\\[\]]++|\\.)* \] )}x, $pattern;
+    for my $part (@parts) {
+        next unless $part;
+
+        # foo/**/bar
+        #    ^^^^
+        if ('/**/' eq $part) {
+            push @re, qr{/(?:[^/]+/)*};
+            next;
+        }
+
+        # foo/**
+        #    ^^^
+        if ('/**' eq $part) {
+            push @re, qr{/.*};
+            next;
+        }
+
+        # **
+        if ('**' eq $part) {
+            confess 'E! Unexpected "**"';
+        }
+
+        # foo*bar
+        #    ^
+        if ('*' eq $part) {
+            push @re, qr{[^/]*};
+            next;
+        }
+
+        # foo?bar
+        #    ^
+        # foo???bar
+        #    ^^^
+        if ('?' eq substr($part, 0, 1)) {
+            my $n = length $part;
+            push @re, qr<[^/]{$n}>;
+            next;
+        }
+
+        # foo[...]bar
+        #    ^^^^^
+        if ($part =~ /^\[/) {
+            push @re, qr/$part/;
+            next;
+        }
+
+        push @re, qr/\Q$part\E/;
+    }
+
+    push @re, qr/$/;
+
+    local $" = '';
+    return qr/@re/;
+}
+
+sub read_rules() {
+    my $f;
+    my $fail = 0;
+
+    if ('-' eq $opt{rules}) {
+        $f = \*STDIN;
+    }
+    else {
+        open($f, '<', $opt{rules}) or die qq(E! Unable to read "$opt{rules}": $!\n);
+    }
+
+    @rules = ();
+
+    while (my $rule = <$f>) {
+        chomp $rule;
+        $rule =~ s/\s+$//;
+        next if $rule =~ /^(?:#|$)/;
+        my ($pattern, $whos, @rest) = split(/\s+/, $rule);
+
+        if (@rest) {
+            warn qq(W! Malformed rule - too much fields: [$.] $rule\n);
+            $fail = 1;
+            next;
+        }
+
+        if ('' eq $pattern) {
+            warn qq(W! Empty pattern: [$.] $rule\n);
+            $fail = 1;
+            next;
+        }
+
+        unless ($pattern =~
+            m{
+                ^
+                /?
+                (?:
+                    # компонент пути
+                    (?:
+                        \*\*
+                    |
+                        (?:
+                            [^/*]++
+                        |
+                            \* (?! \* )
+                        )+
+                    )
+                    # конец или слеш перед повтором
+                    (?:
+                        $
+                    |
+                        /
+                    )
+                )*
+                $
+            }x
+        ) {
+            warn qq(W! Invalid pattern "$pattern": [$.] $rule\n);
+            $fail = 1;
+            next;
+        }
+
+        my $dir = $pattern =~ m{/$};
+        my $re  = pattern_to_re($pattern, $dir);
+
+        if (defined $whos) {
+            if ('-' eq $whos) {
+                $whos = undef;
+            }
+            elsif ($whos =~ /^$RE_ROLE$/) {
+                unless (defined $roles{$whos}) {
+                    warn qq(W! Unknown role "$whos": [$.] $rule\n);
+                    $fail = 1;
+                    next;
+                }
+
+                if (!$dir && !defined $roles{$whos}->{file_mode}) {
+                    warn qq(W! Role "$whos" cannot be applied for files: [$.] $rule\n);
+                    $fail = 1;
+                    next;
+                }
+
+                # ok
+            }
+            else {
+                warn qq(W! Malformed role "$whos": [$.] $rule\n);
+                $fail = 1;
+                next;
+            }
+        }
+
+        push @rules, {
+            pattern => $pattern,
+            re      => $re,
+            dir     => $dir,
+            whos    => $whos,
+        };
+    }
+
+    close $f unless $f == \*STDIN;
+
+    $fail and die qq(E! Some rules are not valid\n);
+}
+
+sub apply_role($$$) {
+    my ($full, $role_name, $is_dir) = @_;
+
+    my $role = $roles{$role_name};
+    my $mode = ($is_dir) ? $role->{dir_mode} : $role->{file_mode};
+
+    chown $role->{user_id}, $role->{group_id}, $full
+        or warn qq(W! Can't CHOWN "$full" - $!\n)
+    ;
+    chmod $mode, $full
+        or warn qq(W! Can't CHMOD "$full" - $!\n)
+    ;
+}
+
+sub process_by_rules($$$) {
+    my ($relative, $full, $is_dir) = @_;
+
+    my $ok = 0;
+    for my $rule (@rules) {
+        next   if $is_dir xor $rule->{dir};
+        next   if $relative !~ $rule->{re};
+
+        $ok = 1;
+        apply_role($full, $rule->{whos}, $is_dir)
+            if defined $rule->{whos}
+        ;
+        last;
+    }
+
+    warn qq(W! no patterns matched "$relative"\n) unless $ok;
+}
+
+sub perform_rights_change() {
+    # /path/subpath
+    # ------
+    #      ^
+    # =>
+    #      /subpath
+    my $rel_pos = length($opt{directory}) - 1;
+    my $process_found = sub {
+        my $name     = $_;
+        my $full     = $File::Find::name;
+        my $relative = substr $full, $rel_pos;
+
+        return if -l $full;
+        my $is_dir = -d _;
+        return unless $is_dir || -f _;
+        
+        $relative .= '/' if $is_dir;
+
+        process_by_rules($relative, $full, $is_dir);
+    };
+
+    find($process_found, $opt{directory});
+}
+
+sub do_the_work() {
+    init_roles();
+    read_rules();
+
+    chdir $opt{directory} or die qq(E! Unable to CD to "$opt{directory}" - $!\n);
+
+    perform_rights_change();
+}
+
+
+load_options();
+process_info_options();
+do_the_work();
+1;
+
+__END__;
+
+=pod
+
+=head1 NAME
+
+tree-rights - a tool to change filesystem rights if a project directory
+according to rules
+
+=head1 SYNOPSIS
+
+B<tree-rights> [I<options>] [--] [<FILE>]
+
+B<tree-rights> (B<-h> | B<-?> | B<--help> | B<--man> | B<--version>)
+
+=head1 DESCRIPTION
+
+This tool scan project directory recursively and change owners and permisions
+with respect to rules.
+
+Rules read from file B<-f> (see B<OPTIONS>).
+
+=over
+
+=item
+
+Empty lines and lines starting with C<#> are completely ignored as comments.
+
+=item
+
+Normal lines are splitted by whitespaces into fields. Currently up to 2 fields are expected:
+
+=over
+
+=item 1 I<pattern> - pattern for path relative to project root in B<gitignore>
+style, but with some differences:
+
+=over
+
+=item Patterns without C</> in the end will match regular files only. Same as patterns
+with C</> will match directories only.
+
+=item No any negations with C<!> are needed.
+
+=back
+
+=item 2 I<whos> - a role, defined with B<-r> switch. If I<whos> is omited,
+then rule will successfully do nothing.
+
+=back
+
+=back
+
+When project directory is scanned, each found file and directory will be testes
+by patterns in the order, and only one first matched rule will be applied.
+
+=head1 OPTIONS
+
+=over
+
+=item B<-d> I<path>, B<--directory=>I<path>
+
+Path to the tree. Default is C<.>, t.i. current working directory.
+
+=item B<-f> I<FILE>, B<--rules=>I<FILE>
+
+File with rules. Standard input will be used if B<-f> is omitted.
+Also C<-> can be passed as I<FILE> to mean STDIN explicitly.
+
+See also I<FILE>.
+
+=item B<-h>, B<-?>, B<--help>
+
+Print short help about usage and exit.
+
+=item B<--man>
+
+Display full man and exit.
+
+=item B<-r> I<role>B<=>I<perm>, B<--role=>I<role>B<=>I<perm>
+
+Declare roles to use in rules table. One B<-r> declares one role, so
+multiple B<-r>s are fine.
+
+Here I<perm> should be I<user>[B<:>I<group>]B<,>[I<dir-mode>B</>][I<file-mode>].
+
+=over
+
+=item
+
+If I<group> is omited, then I<group> is same as I<user>.
+
+=item
+
+Both I<file-mode> and I<dir-mode> must be 3 or 4 octal digits.
+
+=item
+
+Either I<file-mode> or I<dir-mode> must be passed.
+
+=item
+
+If I<dir-mode> is omited, then I<dir-mode> is derived from I<file-mode>
+setting B<x> bit where B<r> bit is set (i.e. I<640> become I<750>).
+
+=item
+
+If I<file-mode> is omited, then the role can be applied for directories only,
+not for files.
+
+=back
+
+=item B<--version>
+
+Print program version and exit.
+
+=item I<FILE>
+
+Same as B<-f>. Cannot be used together.
+
+=back
+
+=head1 AUTHORS
+
+=over
+
+=item i-deal Studio <mail@i-dl.ru>, <http://www.i-dl.ru/>
+
+=item Vovan-VE <vovan-ve@yandex.ru>
+
+=back
+
+=cut
